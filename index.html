@@ -194,6 +194,24 @@
         width: 1px;
         padding-right: 0.2rem;
       }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.3rem 0.6rem;
+        border: 1px solid var(--ok);
+        border-radius: 999px;
+        color: var(--ok);
+        font-size: 0.85rem;
+        font-weight: 600;
+      }
+      .badge::before {
+        content: '';
+        width: 0.45rem;
+        height: 0.45rem;
+        border-radius: 50%;
+        background: var(--ok);
+      }
       .pill {
         display: inline-block;
         padding: 0.12rem 0.5rem;
@@ -263,8 +281,9 @@
           />
           <button id="load">Check</button>
         </div>
-        <div class="row" style="margin-top: 0.7rem">
+        <div class="row" style="margin-top: 0.7rem; align-items: center">
           <button id="connect" class="secondary">Connect wallet</button>
+          <span id="wallet-status" class="badge" hidden></span>
         </div>
         <p class="muted" id="manifest-meta" style="margin-bottom: 0"></p>
       </section>

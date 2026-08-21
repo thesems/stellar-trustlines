@@ -396,6 +396,14 @@ function renderSummary() {
        download the XDR and sign it through your usual process.</p>`
     )
   }
+  if (state.walletAddress && state.walletAddress !== state.address) {
+    notes.push(
+      `<p class="warn">The connected wallet
+       (<span class="mono">${short(state.walletAddress)}</span>) is not this
+       account. That is fine if it is a signer on it — otherwise the wallet
+       will refuse to sign.</p>`
+    )
+  }
   const unauthorized = state.rows.filter((r) => r.status === 'unauthorized')
   if (unauthorized.length > 0) {
     notes.push(
@@ -534,9 +542,14 @@ async function signAndSubmit() {
  */
 function wireConnect() {
   $('connect').addEventListener('click', async () => {
+    if (state.walletAddress) {
+      await disconnectWallet()
+      return
+    }
     try {
       const address = await connectWallet()
       state.walletAddress = address
+      renderWalletState()
       if (!$('address').value.trim()) $('address').value = address
       await load($('address').value.trim())
     } catch (error) {
@@ -544,6 +557,34 @@ function wireConnect() {
       setStatus(error.message ?? 'Wallet connection cancelled.', 'error')
     }
   })
+  renderWalletState()
+}
+
+/** Drops the connection but keeps the loaded account, so the diff stays put. */
+async function disconnectWallet() {
+  try {
+    await state.kit.disconnect()
+  } catch {
+    // Whether the wallet acknowledges the disconnect or not, the page has to
+    // stop claiming a connection — the local state is what the UI acts on.
+  }
+  state.walletAddress = null
+  renderWalletState()
+  if (state.account) render()
+}
+
+/**
+ * Reflects the connection in the button and the address beside it. Without
+ * this the button reads "Connect wallet" whether or not one is connected.
+ */
+function renderWalletState() {
+  const connected = Boolean(state.walletAddress)
+  $('connect').textContent = connected ? 'Disconnect' : 'Connect wallet'
+  const badge = $('wallet-status')
+  badge.hidden = !connected
+  badge.innerHTML = connected
+    ? `Signing with <span class="mono">${short(state.walletAddress)}</span>`
+    : ''
 }
 
 // ----------------------------------------------------------------- Boot
