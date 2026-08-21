@@ -38,6 +38,7 @@ const state = {
   address: null,
   account: null,
   rows: [],
+  selected: new Set(),
   kit: null,
   walletAddress: null,
   batches: [],
@@ -185,6 +186,19 @@ function buildRows() {
 const missingRows = () => state.rows.filter((row) => row.status === 'missing')
 
 /**
+ * The rows that will actually be created. Everything missing is selected by
+ * default — the common case is "set this account up" — but a partner can
+ * narrow it to the assets they expect to receive.
+ */
+const selectedRows = () =>
+  missingRows().filter((row) => state.selected.has(row.contract))
+
+/** Resets the selection to everything missing, after a load or a submission. */
+const selectAllMissing = () => {
+  state.selected = new Set(missingRows().map((row) => row.contract))
+}
+
+/**
  * Splits the missing assets into transactions. Each is built against the same
  * starting sequence number, so they must be submitted in order, and the account
  * is re-read between submissions rather than pre-chaining the whole set — one
@@ -312,11 +326,23 @@ const STATUS_LABEL = {
   unauthorized: 'Needs issuer approval',
 }
 
+/** A checkbox for a missing row; a dash for one that is already established. */
+function selectCell(row) {
+  if (row.status !== 'missing') return '<td></td>'
+  const checked = state.selected.has(row.contract) ? ' checked' : ''
+  return `<td><input type="checkbox" data-contract="${row.contract}"
+    aria-label="Create trustline for ${row.code}"${checked} /></td>`
+}
+
 function renderTable() {
+  const missing = missingRows()
+  const allChecked =
+    missing.length > 0 && selectedRows().length === missing.length
   const rows = state.rows
     .map(
       (row) => `
       <tr>
+        ${selectCell(row)}
         <td><strong>${row.code}</strong></td>
         <td class="mono">${short(row.issuer)}</td>
         <td><span class="pill ${row.status}">${STATUS_LABEL[row.status]}</span></td>
@@ -327,7 +353,10 @@ function renderTable() {
   $('assets').innerHTML = `
     <table>
       <thead>
-        <tr><th>Asset</th><th>Issuer</th><th>Trustline</th><th>Notes</th></tr>
+        <tr>
+          <th>${missing.length > 0 ? `<input type="checkbox" id="select-all" aria-label="Select all missing" ${allChecked ? 'checked' : ''} />` : ''}</th>
+          <th>Asset</th><th>Issuer</th><th>Trustline</th><th>Notes</th>
+        </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`
@@ -340,7 +369,8 @@ function renderTable() {
  */
 function renderSummary() {
   const missing = missingRows()
-  const cost = missing.length * BASE_RESERVE
+  const selected = selectedRows()
+  const cost = selected.length * BASE_RESERVE
   const underfunded = state.account.available < cost
   const multisig = state.account.mediumThreshold > state.account.masterWeight
 
@@ -350,9 +380,9 @@ function renderSummary() {
       '<p class="ok">Every asset in the manifest already has a trustline.</p>'
     )
   }
-  if (underfunded && missing.length > 0) {
+  if (underfunded && selected.length > 0) {
     notes.push(
-      `<p class="warn">Not enough XLM: ${missing.length} trustlines lock
+      `<p class="warn">Not enough XLM: ${selected.length} trustlines lock
        <strong>${cost} XLM</strong> but only
        <strong>${state.account.available.toFixed(2)} XLM</strong> is available.
        Fund the account before continuing.</p>`
@@ -381,21 +411,42 @@ function renderSummary() {
       <div><dt>Balance</dt><dd>${state.account.balance.toFixed(2)} XLM</dd></div>
       <div><dt>Available</dt><dd>${state.account.available.toFixed(2)} XLM</dd></div>
       <div><dt>Missing trustlines</dt><dd>${missing.length} of ${state.rows.length}</dd></div>
+      <div><dt>Selected</dt><dd>${selected.length}</dd></div>
       <div><dt>Reserve needed</dt><dd>${cost} XLM</dd></div>
     </dl>
     ${notes.join('')}`
 
-  const canSign = missing.length > 0 && !underfunded && !multisig
+  const canSign = selected.length > 0 && !underfunded && !multisig
   $('actions').hidden = missing.length === 0
   $('sign').hidden = !canSign
+  $('copy').disabled = selected.length === 0
+  $('download').disabled = selected.length === 0
   $('sign').textContent =
     state.batches.length > 1
-      ? `Create ${missing.length} trustlines (${state.batches.length} transactions)`
-      : `Create ${missing.length} trustlines`
+      ? `Create ${selected.length} trustlines (${state.batches.length} transactions)`
+      : `Create ${selected.length} trustline${selected.length === 1 ? '' : 's'}`
+}
+
+/**
+ * Selection changes are delegated from the container, which is replaced on
+ * every render — per-checkbox listeners would not survive it.
+ */
+function wireSelection() {
+  $('assets').addEventListener('change', (event) => {
+    const target = event.target
+    if (target.id === 'select-all') {
+      if (target.checked) selectAllMissing()
+      else state.selected.clear()
+    } else if (target.dataset?.contract) {
+      if (target.checked) state.selected.add(target.dataset.contract)
+      else state.selected.delete(target.dataset.contract)
+    } else return
+    render()
+  })
 }
 
 function render() {
-  state.batches = buildBatches(missingRows())
+  state.batches = buildBatches(selectedRows())
   renderSummary()
   renderTable()
   $('results').hidden = false
@@ -421,6 +472,7 @@ async function load(address) {
     state.address = address
     state.account = account
     state.rows = buildRows()
+    selectAllMissing()
     render()
     setStatus('')
   } catch (error) {
@@ -444,6 +496,10 @@ async function signAndSubmit() {
     setStatus('Connect a wallet first.', 'error')
     return
   }
+  if (selectedRows().length === 0) {
+    setStatus('Select at least one asset.', 'error')
+    return
+  }
   $('sign').disabled = true
   try {
     for (let i = 0; i < state.batches.length; i++) {
@@ -457,10 +513,13 @@ async function signAndSubmit() {
 
       state.account = await readAccount(state.address, state.manifest.assets)
       state.rows = buildRows()
-      state.batches = buildBatches(missingRows())
+      // The selection is deliberately left alone: `selectedRows` intersects it
+      // with what is still missing, so created assets drop out on their own
+      // and anything the partner unchecked stays unchecked.
+      state.batches = buildBatches(selectedRows())
       render()
     }
-    setStatus('All trustlines created.', 'ok')
+    setStatus('Selected trustlines created.', 'ok')
   } catch (error) {
     setStatus(error.message, 'error')
   } finally {
@@ -508,6 +567,7 @@ async function main() {
 
   state.kit = initWallets()
   wireConnect()
+  wireSelection()
 
   $('load').addEventListener('click', () => load($('address').value.trim()))
   $('address').addEventListener('keydown', (event) => {
