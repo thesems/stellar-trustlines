@@ -38,7 +38,8 @@ const state = {
   address: null,
   account: null,
   rows: [],
-  wallet: null,
+  kit: null,
+  walletAddress: null,
   batches: [],
 }
 
@@ -218,65 +219,38 @@ function buildTransaction(batch, sequence) {
 // ------------------------------------------------------------- Wallets
 
 /**
- * Injected wallet adapters. Each extension exposes its own API, so the shape is
- * normalised here. Hardware wallets and multisig accounts are deliberately not
- * covered — those go through the unsigned XDR, which is always available.
+ * Wallet access goes through Stellar Wallets Kit, which covers the injected
+ * extensions plus Ledger over WebUSB. Ledger therefore needs a secure context:
+ * it works over https and on localhost, but not from a `file://` page.
+ *
+ * The kit's API is entirely static — `init` once, then call through the class.
  */
-const WALLETS = [
-  {
-    id: 'freighter',
-    name: 'Freighter',
-    detect: () => window.freighterApi,
-    connect: async () => {
-      const { address, error } = await window.freighterApi.requestAccess()
-      if (error) throw new Error(error)
-      return address
-    },
-    sign: async (txXdr, address) => {
-      const { signedTxXdr, error } = await window.freighterApi.signTransaction(
-        txXdr,
-        { networkPassphrase: NETWORK_PASSPHRASE, address }
-      )
-      if (error) throw new Error(error)
-      return signedTxXdr
-    },
-  },
-  {
-    id: 'xbull',
-    name: 'xBull',
-    detect: () => window.xBullSDK,
-    connect: async () => {
-      await window.xBullSDK.connect({
-        canRequestPublicKey: true,
-        canRequestSign: true,
-      })
-      return window.xBullSDK.getPublicKey()
-    },
-    sign: (txXdr, address) =>
-      window.xBullSDK.signXDR(txXdr, {
-        network: NETWORK_PASSPHRASE,
-        publicKey: address,
-      }),
-  },
-  {
-    id: 'albedo',
-    name: 'Albedo',
-    detect: () => window.albedo,
-    connect: async () => (await window.albedo.publicKey({})).pubkey,
-    sign: async (txXdr) =>
-      (await window.albedo.tx({ xdr: txXdr, network: 'public' }))
-        .signed_envelope_xdr,
-  },
-  {
-    id: 'rabet',
-    name: 'Rabet',
-    detect: () => window.rabet,
-    connect: async () => (await window.rabet.connect()).publicKey,
-    sign: async (txXdr) => (await window.rabet.sign(txXdr, 'mainnet')).xdr,
-  },
-]
+function initWallets() {
+  const { StellarWalletsKit, modules } = window.LifiWallets
+  StellarWalletsKit.init({
+    network: NETWORK_PASSPHRASE,
+    modules: modules.map((Module) => new Module()),
+  })
+  return StellarWalletsKit
+}
 
-const detectWallets = () => WALLETS.filter((wallet) => wallet.detect())
+/** Opens the kit's wallet picker and returns the address the user selected. */
+async function connectWallet() {
+  const { address } = await state.kit.authModal()
+  return address
+}
+
+/**
+ * Signs with the connected wallet. `address` is passed through so the wallet
+ * signs with the account being set up rather than whatever it last selected.
+ */
+async function signTransaction(txXdr, address) {
+  const { signedTxXdr } = await state.kit.signTransaction(txXdr, {
+    networkPassphrase: NETWORK_PASSPHRASE,
+    address,
+  })
+  return signedTxXdr
+}
 
 // ---------------------------------------------------------- Submission
 
@@ -466,8 +440,7 @@ function unsignedXdrs() {
  * the next transaction picks up the sequence number the network actually has.
  */
 async function signAndSubmit() {
-  const wallet = state.wallet
-  if (!wallet) {
+  if (!state.walletAddress) {
     setStatus('Connect a wallet first.', 'error')
     return
   }
@@ -476,7 +449,7 @@ async function signAndSubmit() {
     for (let i = 0; i < state.batches.length; i++) {
       setStatus(`Transaction ${i + 1} of ${state.batches.length}: awaiting signature…`)
       const tx = buildTransaction(state.batches[i], state.account.sequence)
-      const signed = await wallet.sign(tx.toXDR(), state.address)
+      const signed = await signTransaction(tx.toXDR(), state.address)
 
       setStatus(`Transaction ${i + 1} of ${state.batches.length}: submitting…`)
       const hash = await submitTransaction(signed)
@@ -495,29 +468,23 @@ async function signAndSubmit() {
   }
 }
 
-function renderWallets() {
-  const wallets = detectWallets()
-  if (wallets.length === 0) {
-    $('wallets').innerHTML =
-      '<p class="muted">No wallet extension detected. You can still load an address and download the XDR.</p>'
-    return
-  }
-  $('wallets').innerHTML = wallets
-    .map((w) => `<button data-wallet="${w.id}" class="secondary">${w.name}</button>`)
-    .join('')
-  for (const button of $('wallets').querySelectorAll('[data-wallet]')) {
-    button.addEventListener('click', async () => {
-      const wallet = wallets.find((w) => w.id === button.dataset.wallet)
-      try {
-        const address = await wallet.connect()
-        state.wallet = wallet
-        $('address').value = address
-        await load(address)
-      } catch (error) {
-        setStatus(`${wallet.name}: ${error.message}`, 'error')
-      }
-    })
-  }
+/**
+ * The kit renders its own wallet picker, so the page only needs one button.
+ * Connecting fills the address field but does not lock it: a signer key is
+ * often not the collector account itself.
+ */
+function wireConnect() {
+  $('connect').addEventListener('click', async () => {
+    try {
+      const address = await connectWallet()
+      state.walletAddress = address
+      if (!$('address').value.trim()) $('address').value = address
+      await load($('address').value.trim())
+    } catch (error) {
+      // The kit throws `{code, message}` when the user dismisses the modal.
+      setStatus(error.message ?? 'Wallet connection cancelled.', 'error')
+    }
+  })
 }
 
 // ----------------------------------------------------------------- Boot
@@ -539,7 +506,8 @@ async function main() {
   $('manifest-meta').textContent =
     `${state.manifest.assets.length} assets · generated ${state.manifest.generatedAt.slice(0, 10)}`
 
-  renderWallets()
+  state.kit = initWallets()
+  wireConnect()
 
   $('load').addEventListener('click', () => load($('address').value.trim()))
   $('address').addEventListener('keydown', (event) => {

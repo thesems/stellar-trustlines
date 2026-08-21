@@ -1,0 +1,15 @@
+{
+  "name": "lifi-stellar-trustlines-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=iife --minify --target=es2020 --inject:./shim.js --define:global=globalThis --outfile=../vendor/bundle.min.js"
+  },
+  "dependencies": {
+    "@creit.tech/stellar-wallets-kit": "2.5.0",
+    "@stellar/stellar-sdk": "^16.0.0",
+    "buffer": "^6.0.3",
+    "esbuild": "^0.25.0",
+    "process": "^0.11.10"
+  }
+}
